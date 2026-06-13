@@ -670,19 +670,34 @@ class App(tk.Tk):
         self._panel_open = False
         self._hide_job   = None
 
+    def _in_panel_zone(self, widget):
+        """Return True if widget is the strip, panel, or any descendant of them."""
+        w = widget
+        while w is not None:
+            if w is self._strip or w is self._panel:
+                return True
+            try:
+                w = w.master
+            except AttributeError:
+                break
+        return False
+
     def _hover_loop(self):
-        """Poll mouse position every 120ms — close panel when mouse leaves the strip+panel zone."""
+        """Poll every 120 ms — close panel when the cursor leaves the strip+panel zone."""
         if self._panel_open:
             try:
-                mx = self.winfo_pointerx() - self.winfo_rootx()
-                edge = STRIP_W + PANEL_W + 12
-                if mx > edge or mx < 0:
-                    if not self._hide_job:
-                        self._hide_job = self.after(350, self._close_panel)
-                else:
+                px  = self.winfo_pointerx()
+                py  = self.winfo_pointery()
+                hit = self.winfo_containing(px, py)
+                if self._in_panel_zone(hit):
+                    # cursor is inside — cancel any pending close
                     if self._hide_job:
                         self.after_cancel(self._hide_job)
                         self._hide_job = None
+                else:
+                    # cursor is outside — schedule close if not already pending
+                    if not self._hide_job:
+                        self._hide_job = self.after(350, self._close_panel)
             except Exception:
                 pass
         self.after(120, self._hover_loop)
