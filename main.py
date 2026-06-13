@@ -348,86 +348,129 @@ class MapCanvas(tk.Canvas):
 
     # ── drawing ───────────────────────────────────────────────────────────────
 
+    def _box_size(self, d):
+        """Return (half_w, half_h) of a node's rectangle at current zoom."""
+        z    = self._zoom
+        name = "YOU" if d["is_source"] else d["name"]
+        fs   = max(7, int((10 if d["is_source"] else 9) * z))
+        bw   = max(44 * z, len(name) * fs * 0.63 + 20 * z)
+        bh   = max(13 * z, fs * 0.5 + 9 * z)
+        return bw, bh
+
     def _redraw(self):
         self.delete("all")
         if not self._nodes: return
         w = self.winfo_width()  or 900
         h = self.winfo_height() or 600
 
-        # dot grid
+        # pre-compute box sizes so line routing can use them
+        for d in self._nodes.values():
+            d["_bw"], d["_bh"] = self._box_size(d)
+
+        # ── dot grid ─────────────────────────────────────────────────────────
         step = max(30, int(45 * self._zoom))
         ox   = int((self._pan[0] * self._zoom + w/2) % step)
         oy   = int((self._pan[1] * self._zoom + h/2) % step)
         for gx in range(ox - step, w + step, step):
             for gy in range(oy - step, h + step, step):
-                self.create_oval(gx-1, gy-1, gx+1, gy+1, fill="#d1d9e6", outline="")
+                self.create_oval(gx-1, gy-1, gx+1, gy+1, fill="#dde3ec", outline="")
 
-        # source node position (use actual lx/ly in case it was dragged)
-        src = next((d for d in self._nodes.values() if d["is_source"]), None)
+        # source position
+        src  = next((d for d in self._nodes.values() if d["is_source"]), None)
         sx, sy = self._tc(src["lx"], src["ly"]) if src else self._tc(0, 0)
 
-        # source ripple rings
-        for ring_r in [60, 110, 170]:
-            rr = ring_r * self._zoom
-            self.create_oval(sx-rr, sy-rr, sx+rr, sy+rr,
-                             outline="#c7d2e8", width=1, dash=(4, 6), fill="")
-
-        # cluster halos
+        # ── zone boxes (rectangular, like the reference diagram) ─────────────
         dept_nodes: dict[str, list] = {}
         for ip, d in self._nodes.items():
             if not d["is_source"]:
                 dept_nodes.setdefault(d["dept"], []).append(d)
 
         for dept, dnodes in dept_nodes.items():
-            cx_l  = sum(n["lx"] for n in dnodes) / len(dnodes)
-            cy_l  = sum(n["ly"] for n in dnodes) / len(dnodes)
-            max_r = max((math.sqrt((n["lx"]-cx_l)**2 + (n["ly"]-cy_l)**2)
-                         for n in dnodes), default=0)
-            halo_r   = (max_r + 30) * self._zoom
-            hcx, hcy = self._tc(cx_l, cy_l)
-            fill_c   = dnodes[0]["fill"]
-            self.create_oval(hcx-halo_r, hcy-halo_r, hcx+halo_r, hcy+halo_r,
-                             fill=hex_lighter(fill_c, 0.80),
-                             outline=hex_lighter(fill_c, 0.55),
-                             width=max(1, self._zoom * 1.2))
-            self._badge(hcx, hcy - halo_r - 4, dept, fill_c, hex_darker(fill_c, 0.3))
+            coords = [self._tc(n["lx"], n["ly"]) for n in dnodes]
+            cxs    = [c[0] for c in coords]
+            cys    = [c[1] for c in coords]
+            ebw    = max(n["_bw"] for n in dnodes)
+            ebh    = max(n["_bh"] for n in dnodes)
+            pad    = max(16, 20 * self._zoom)
+            x0, y0 = min(cxs) - ebw - pad, min(cys) - ebh - pad
+            x1, y1 = max(cxs) + ebw + pad, max(cys) + ebh + pad
 
-        # topology connection lines  (parent → child)
-        # Line colour = parent's online status:
-        #   parent online  → green solid
-        #   parent offline → red dashed  (path is broken)
-        lw = max(1, self._zoom * 0.9)
+            fill_c   = dnodes[0]["fill"]
+            light_c  = hex_lighter(fill_c, 0.88)
+            border_c = fill_c
+
+            # shadow
+            self.create_rectangle(x0+3, y0+3, x1+3, y1+3, fill="#c8d0dc", outline="")
+            # zone box — dashed border like the reference map
+            self.create_rectangle(x0, y0, x1, y1,
+                                  fill=light_c, outline=border_c,
+                                  width=max(1.5, self._zoom * 1.8),
+                                  dash=(8, 4))
+            # dept label (top-left corner, inside box)
+            fs_z = max(7, int(8 * self._zoom))
+            self.create_rectangle(x0, y0, x0 + len(dept)*fs_z*0.72 + 14, y0 + fs_z + 8,
+                                  fill=border_c, outline="")
+            self.create_text(x0 + 7, y0 + 4, text=dept, fill="white",
+                             font=("Arial", fs_z, "bold"), anchor="nw")
+
+        # ── topology lines — orthogonal routing ──────────────────────────────
+        lw = max(1.5, self._zoom * 1.4)
         for ip, d in self._nodes.items():
             if d["is_source"]: continue
             tx, ty = self._tc(d["lx"], d["ly"])
+            tbw, tbh = d["_bw"], d["_bh"]
             pid = d.get("parent_ip")
             if pid and pid in self._nodes:
-                p   = self._nodes[pid]
-                px_, py_ = self._tc(p["lx"], p["ly"])
-                parent_up = p["is_source"] or (p.get("latency") is not None)
+                p            = self._nodes[pid]
+                px_, py_     = self._tc(p["lx"], p["ly"])
+                pbw, pbh     = p["_bw"], p["_bh"]
+                parent_up    = p["is_source"] or (p.get("latency") is not None)
             else:
-                # no parent defined → draw from source; source is always up
-                px_, py_  = sx, sy
-                parent_up = True
-            col  = C_LINE_ON  if parent_up else C_LINE_OFF
-            dash = ()          if parent_up else (5, 7)
-            self.create_line(px_, py_, tx, ty,
-                             fill=col, width=lw, dash=dash)
+                px_, py_     = sx, sy
+                pbw          = src["_bw"] if src else 30 * self._zoom
+                pbh          = src["_bh"] if src else 13 * self._zoom
+                parent_up    = True
 
-        # nodes
+            col  = "#0d9488" if parent_up else "#dc2626"
+            dash = ()        if parent_up else (6, 5)
+
+            # choose exit/entry edges based on relative position
+            dx_  = tx - px_
+            dy_  = ty - py_
+            if abs(dy_) >= abs(dx_):          # more vertical → top/bottom exit
+                if ty >= py_:
+                    ax, ay = px_, py_ + pbh   # bottom of parent
+                    bx, by_ = tx, ty - tbh    # top of child
+                else:
+                    ax, ay = px_, py_ - pbh
+                    bx, by_ = tx, ty + tbh
+                my_ = (ay + by_) / 2
+                pts = [ax, ay, ax, my_, bx, my_, bx, by_]
+            else:                              # more horizontal → left/right exit
+                if tx >= px_:
+                    ax, ay = px_ + pbw, py_   # right of parent
+                    bx, by_ = tx - tbw, ty    # left of child
+                else:
+                    ax, ay = px_ - pbw, py_
+                    bx, by_ = tx + tbw, ty
+                mx_ = (ax + bx) / 2
+                pts = [ax, ay, mx_, ay, mx_, by_, bx, by_]
+
+            self.create_line(*pts, fill=col, width=lw, dash=dash,
+                             joinstyle="round", capstyle="round")
+
+            # arrowhead at the child end
+            self._arrowhead(pts[-4], pts[-3], pts[-2], pts[-1], col, lw)
+
+        # ── nodes ─────────────────────────────────────────────────────────────
         for ip, d in self._nodes.items():
             cx, cy = self._tc(d["lx"], d["ly"])
             self._draw_node(cx, cy, ip, d)
 
-        # node labels when zoomed in
-        if self._zoom > 1.3:
-            for ip, d in self._nodes.items():
-                if d["is_source"]: continue
-                cx, cy = self._tc(d["lx"], d["ly"])
-                self._node_label(cx, cy + self.R_DEV * self._zoom + 4, ip, d)
+        # ── legend ────────────────────────────────────────────────────────────
+        self._legend(w - 212, 14)
 
-        self._legend(w - 196, 14)
-
+        # ── lock banner ───────────────────────────────────────────────────────
         if self._locked:
             self.create_rectangle(0, 0, w, 28,
                                   fill="#fef9c3", outline="#fde047", width=1)
@@ -435,101 +478,108 @@ class MapCanvas(tk.Canvas):
                              text="🔒  LOCK MODE ON  —  drag any node to reposition it",
                              fill="#92400e", font=("Arial", 10, "bold"))
 
+    def _arrowhead(self, x1, y1, x2, y2, col, lw):
+        """Draw a small arrowhead at (x2,y2) pointing from (x1,y1)."""
+        if x1 == x2 and y1 == y2: return
+        size = max(5, lw * 3.5)
+        angle = math.atan2(y2 - y1, x2 - x1)
+        a1 = angle + math.radians(145)
+        a2 = angle - math.radians(145)
+        pts = [x2, y2,
+               x2 + size * math.cos(a1), y2 + size * math.sin(a1),
+               x2 + size * math.cos(a2), y2 + size * math.sin(a2)]
+        self.create_polygon(*pts, fill=col, outline="")
+
     def _draw_node(self, cx, cy, ip, d):
-        lat    = d.get("latency")
-        is_src = d["is_source"]
         z      = self._zoom
-        r      = max((self.R_SRC if is_src else self.R_DEV) * z, 4)
+        is_src = d["is_source"]
+        lat    = d.get("latency")
+        bw, bh = d["_bw"], d["_bh"]
+        name   = "YOU" if is_src else d["name"]
+        fs     = max(7, int((10 if is_src else 9) * z))
 
+        # colour scheme
         if is_src:
-            self.create_oval(cx-(r+14*z), cy-(r+14*z), cx+(r+14*z), cy+(r+14*z),
-                             fill=C_SOURCE_GLOW, outline="#93c5fd", width=max(1, z))
-            self.create_oval(cx-(r+7*z), cy-(r+7*z), cx+(r+7*z), cy+(r+7*z),
-                             fill="#bfdbfe", outline=C_SOURCE_MID, width=max(1.5, z*1.5))
-            oid = self.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                   fill=C_SOURCE_CORE, outline="#1d4ed8", width=max(2, z*2))
-            d["oval_id"] = oid
-            self.create_oval(cx-(r*0.3), cy-(r*0.55), cx+(r*0.3), cy-(r*0.05),
-                             fill="white", outline="")
-            self.create_text(cx, cy-2, text="YOU", fill="white",
-                             font=("Arial", max(7, int(9*z)), "bold"))
-            self.create_text(cx, cy+r+6*z, text=ip, fill="#1e40af",
-                             font=("Arial", max(6, int(7*z)), "bold"))
+            bg, border, text_c, dot_c = "#eff6ff", "#2563eb", "#1e40af", "#2563eb"
+        elif lat is not None:
+            bg, border, text_c, dot_c = "#f0fdfa", "#0d9488", "#134e4a", "#16a34a"
         else:
-            fill = d["fill"]
-            if lat is not None:
-                self.create_oval(cx-(r+9*z), cy-(r+9*z), cx+(r+9*z), cy+(r+9*z),
-                                 fill=C_ONLINE_GLOW, outline=C_ONLINE_MID, width=max(1, z*0.8))
-                self.create_oval(cx-(r+4*z), cy-(r+4*z), cx+(r+4*z), cy+(r+4*z),
-                                 fill=hex_lighter(fill, 0.6), outline=C_ONLINE_MID,
-                                 width=max(1.2, z*1.2))
-                oid = self.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                       fill=fill, outline=C_ONLINE_CORE, width=max(2, z*2))
-                if z > 1.1:
-                    ms = f"{lat}ms"
-                    bw = len(ms) * max(4, int(5.5*z))
-                    bh = max(10, int(12*z))
-                    self.create_rectangle(cx-bw/2, cy-r-bh-2*z, cx+bw/2, cy-r-2*z,
-                                          fill=C_ONLINE_CORE, outline="")
-                    self.create_text(cx, cy-r-bh/2-2*z, text=ms, fill="white",
-                                     font=("Arial", max(5, int(6*z)), "bold"))
-            else:
-                self.create_oval(cx-(r+6*z), cy-(r+6*z), cx+(r+6*z), cy+(r+6*z),
-                                 fill=C_OFFLINE_GLOW, outline="#fca5a5", width=max(1, z*0.8))
-                oid = self.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                       fill="#e5e7eb", outline=C_OFFLINE_CORE, width=max(2, z*2))
-                o = r * 0.38
-                self.create_line(cx-o, cy-o, cx+o, cy+o,
-                                 fill=C_OFFLINE_CORE, width=max(1.5, z*1.5), capstyle="round")
-                self.create_line(cx+o, cy-o, cx-o, cy+o,
-                                 fill=C_OFFLINE_CORE, width=max(1.5, z*1.5), capstyle="round")
+            bg, border, text_c, dot_c = "#f9fafb", "#9ca3af", "#6b7280", "#dc2626"
 
-            d["oval_id"] = oid
-            if lat is not None:
-                self.create_oval(cx-(r*0.28), cy-(r*0.55), cx+(r*0.28), cy-(r*0.05),
-                                 fill="white", outline="")
-            if self._locked:
-                self.create_oval(cx-2.5, cy-2.5, cx+2.5, cy+2.5,
-                                 fill="white", outline=FG_SUB, width=1)
+        # drop-shadow
+        self.create_rectangle(cx-bw+2, cy-bh+2, cx+bw+2, cy+bh+2,
+                              fill="#c8d0dc", outline="")
+        # main box
+        oid = self.create_rectangle(cx-bw, cy-bh, cx+bw, cy+bh,
+                                    fill=bg, outline=border,
+                                    width=max(1.5, z * 1.5))
+        d["oval_id"] = oid
 
-    def _node_label(self, cx, by, ip, d):
-        z    = self._zoom
-        text = d["name"][:16] if z > 1.8 else ip
-        fs   = max(6, int(7.5*z))
-        tw   = len(text) * fs * 0.62
-        th   = fs + 6
-        self.create_rectangle(cx-tw/2-4, by, cx+tw/2+4, by+th+4,
-                               fill="white", outline=SEP_COL, width=1)
-        self.create_text(cx, by+th/2+2, text=text, fill=FG_TEXT,
-                         font=("Arial", fs))
+        # left accent bar
+        bar = max(3, 4 * z)
+        self.create_rectangle(cx-bw, cy-bh, cx-bw+bar, cy+bh,
+                              fill=border, outline="")
 
-    def _badge(self, cx, by, text, bg, fg):
-        z    = self._zoom
-        fs   = max(7, int(8*z))
-        tw   = len(text) * fs * 0.68
-        th   = fs + 6
-        self.create_rectangle(cx-tw/2-6, by-th-3, cx+tw/2+6, by,
-                               fill=bg, outline=hex_darker(bg, 0.15), width=1)
-        self.create_text(cx, by-th/2-1, text=text, fill="white",
-                         font=("Arial", fs, "bold"))
+        # status dot (top-right corner)
+        dr = max(3, 3.5 * z)
+        self.create_oval(cx+bw-dr*2-2*z, cy-bh+2*z,
+                         cx+bw-2*z,       cy-bh+dr*2+2*z,
+                         fill=dot_c, outline="white", width=max(1, z*0.8))
+
+        # latency badge (only when zoomed in and online)
+        if lat is not None and z > 1.1:
+            ms   = f"{lat}ms"
+            mfs  = max(5, int(6*z))
+            mbw  = len(ms) * mfs * 0.72 + 6
+            mbh  = mfs + 4
+            self.create_rectangle(cx-mbw/2, cy+bh+1, cx+mbw/2, cy+bh+mbh+2,
+                                  fill="#0d9488", outline="")
+            self.create_text(cx, cy+bh+mbh/2+2, text=ms, fill="white",
+                             font=("Arial", mfs, "bold"))
+
+        # device name text
+        self.create_text(cx + bar/2, cy, text=name, fill=text_c,
+                         font=("Arial", fs, "bold" if is_src else "normal"),
+                         width=int(bw*2 - bar - 4))
+
+        # source IP below box
+        if is_src:
+            self.create_text(cx, cy+bh+5*z, text=ip, fill="#1e40af",
+                             font=("Arial", max(6, int(7*z))))
+
+        # drag handle when locked
+        if self._locked and not is_src:
+            self.create_oval(cx-2.5, cy-2.5, cx+2.5, cy+2.5,
+                             fill="white", outline="#9ca3af", width=1)
 
     def _legend(self, x, y):
-        pad = 12; lh = 24; bw = 182; bh = pad*2 + 16 + lh*3
+        """Cable colour indication legend — matches the reference diagram style."""
+        pad = 12; lh = 22; bw = 198
+        items = [
+            ("#0d9488", (),      "Path online   (solid teal)"),
+            ("#dc2626", (6, 4),  "Path broken  (dashed red)"),
+            ("#2563eb", (),      "Source  — your machine"),
+        ]
+        bh = pad * 2 + 18 + lh * len(items)
+
+        # shadow + card
         self.create_rectangle(x+3, y+3, x+bw+3, y+bh+3, fill="#c8d0dc", outline="")
         self.create_rectangle(x, y, x+bw, y+bh, fill="white", outline=SEP_COL, width=1)
-        self.create_text(x+pad, y+pad, text="LEGEND", fill=ACCENT,
-                         font=("Arial", 9, "bold"), anchor="nw")
-        for i, (core, glow, lbl) in enumerate([
-            (C_ONLINE_CORE,  C_ONLINE_GLOW,  "Online"),
-            (C_OFFLINE_CORE, C_OFFLINE_GLOW, "Offline"),
-            (C_SOURCE_CORE,  C_SOURCE_GLOW,  "Source  (your machine)"),
-        ]):
-            oy = y + pad + 16 + lh*i
-            self.create_oval(x+pad, oy+3, x+pad+16, oy+19,
-                             fill=glow, outline=core, width=2)
-            self.create_oval(x+pad+3, oy+6, x+pad+13, oy+16, fill=core, outline="")
-            self.create_text(x+pad+22, oy+4, text=lbl, fill=FG_TEXT,
-                             font=("Arial", 9), anchor="nw")
+
+        # title bar
+        self.create_rectangle(x, y, x+bw, y+18, fill="#f1f5f9", outline=SEP_COL, width=1)
+        self.create_text(x+pad, y+3, text="Cable colour indication",
+                         fill=FG_TEXT, font=("Arial", 8, "bold"), anchor="nw")
+
+        for i, (col, dash, lbl) in enumerate(items):
+            oy  = y + pad + 18 + lh * i
+            lx1 = x + pad
+            lx2 = x + pad + 36
+            ly  = oy + lh // 2
+            self.create_line(lx1, ly, lx2, ly, fill=col, width=2.5, dash=dash,
+                             capstyle="round")
+            self.create_text(lx2 + 8, ly - 1, text=lbl, fill=FG_TEXT,
+                             font=("Arial", 8), anchor="w")
 
 # ── main application ──────────────────────────────────────────────────────────
 
