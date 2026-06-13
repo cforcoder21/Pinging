@@ -147,7 +147,8 @@ def _from_csv(path):
                 rows.append({"IP": ip,
                              "Name": r.get("Name", "").strip(),
                              "Department": r.get("Department", "Unknown").strip(),
-                             "Location": r.get("Location", "").strip()})
+                             "Location": r.get("Location", "").strip(),
+                             "Parent IP": r.get("Parent IP", "").strip()})
     return rows
 
 def _from_xlsx(path):
@@ -162,7 +163,8 @@ def _from_xlsx(path):
             rows.append({"IP": ip,
                          "Name": str(row[col.get("Name", 1)] or "").strip(),
                          "Department": str(row[col.get("Department", 2)] or "Unknown").strip(),
-                         "Location": str(row[col.get("Location", 3)] or "").strip() if "Location" in col else ""})
+                         "Location": str(row[col.get("Location", 3)] or "").strip() if "Location" in col else "",
+                         "Parent IP": str(row[col.get("Parent IP", -1)] or "").strip() if "Parent IP" in col else ""})
     return rows
 
 def sunflower(n, cx, cy, spacing=28):
@@ -334,6 +336,7 @@ class MapCanvas(tk.Canvas):
                 "dept": d["dept"],
                 "location": d.get("location", ""),
                 "is_source": d.get("is_source", False),
+                "parent_ip": d.get("parent_ip"),   # None → direct child of source
                 "latency": None,
                 "oval_id": None,
             }
@@ -359,8 +362,11 @@ class MapCanvas(tk.Canvas):
             for gy in range(oy - step, h + step, step):
                 self.create_oval(gx-1, gy-1, gx+1, gy+1, fill="#d1d9e6", outline="")
 
+        # source node position (use actual lx/ly in case it was dragged)
+        src = next((d for d in self._nodes.values() if d["is_source"]), None)
+        sx, sy = self._tc(src["lx"], src["ly"]) if src else self._tc(0, 0)
+
         # source ripple rings
-        sx, sy = self._tc(0, 0)
         for ring_r in [60, 110, 170]:
             rr = ring_r * self._zoom
             self.create_oval(sx-rr, sy-rr, sx+rr, sy+rr,
@@ -386,15 +392,27 @@ class MapCanvas(tk.Canvas):
                              width=max(1, self._zoom * 1.2))
             self._badge(hcx, hcy - halo_r - 4, dept, fill_c, hex_darker(fill_c, 0.3))
 
-        # connection lines
+        # topology connection lines  (parent → child)
+        # Line colour = parent's online status:
+        #   parent online  → green solid
+        #   parent offline → red dashed  (path is broken)
+        lw = max(1, self._zoom * 0.9)
         for ip, d in self._nodes.items():
             if d["is_source"]: continue
-            lat = d.get("latency")
             tx, ty = self._tc(d["lx"], d["ly"])
-            self.create_line(sx, sy, tx, ty,
-                             fill=C_LINE_ON if lat is not None else C_LINE_OFF,
-                             width=max(1, self._zoom * 0.8),
-                             dash=() if lat is not None else (3, 8))
+            pid = d.get("parent_ip")
+            if pid and pid in self._nodes:
+                p   = self._nodes[pid]
+                px_, py_ = self._tc(p["lx"], p["ly"])
+                parent_up = p["is_source"] or (p.get("latency") is not None)
+            else:
+                # no parent defined → draw from source; source is always up
+                px_, py_  = sx, sy
+                parent_up = True
+            col  = C_LINE_ON  if parent_up else C_LINE_OFF
+            dash = ()          if parent_up else (5, 7)
+            self.create_line(px_, py_, tx, ty,
+                             fill=col, width=lw, dash=dash)
 
         # nodes
         for ip, d in self._nodes.items():
@@ -787,13 +805,15 @@ class App(tk.Tk):
             n     = len(devs)
             sp    = max(16, min(28, 160/math.sqrt(n+1)))
             for dev, (nx, ny) in zip(devs, sunflower(n, dcx, dcy, sp)):
-                ip = dev["IP"]
+                ip  = dev["IP"]
+                pid = dev.get("Parent IP", "").strip() or None
                 self._systems[ip] = {"name":dev["Name"],"dept":dept,
                                       "location":dev["Location"],"latency":None}
                 node_list.append({"ip":ip,"name":dev["Name"],"dept":dept,
                                   "location":dev["Location"],
                                   "fill":dept_color[dept],
-                                  "lx":nx,"ly":ny,"is_source":False})
+                                  "lx":nx,"ly":ny,"is_source":False,
+                                  "parent_ip": pid})
 
         self._map.set_nodes(node_list, preserved_positions=preserved)
         self.after(150, self._map.fit_view)
