@@ -1,8 +1,6 @@
-import sys, os, subprocess
+import sys, os, subprocess, json
 
 # ── venv bootstrap (cross-platform) ──────────────────────────────────────────
-# macOS/Linux: .venv/lib/pythonX.Y/site-packages
-# Windows:     .venv/Lib/site-packages
 _base = os.path.dirname(os.path.abspath(__file__))
 if sys.platform == "win32":
     _venv = os.path.join(_base, ".venv", "Lib", "site-packages")
@@ -12,7 +10,7 @@ else:
 if os.path.exists(_venv) and _venv not in sys.path:
     sys.path.insert(0, _venv)
 
-import csv, math, time, threading, socket
+import csv, math, threading, socket
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import tkinter as tk
@@ -27,7 +25,6 @@ except ImportError:
 # ── cross-platform ping ───────────────────────────────────────────────────────
 
 def _subprocess_ping(ip):
-    """Fallback ping using the OS ping binary — works on both Windows and macOS/Linux."""
     try:
         if sys.platform == "win32":
             cmd = ["ping", "-n", "1", "-w", "800", ip]
@@ -56,7 +53,6 @@ try:
             r = _ping3(ip, timeout=timeout)
             return round(r * 1000, 1) if r else None
         except PermissionError:
-            # Windows requires Administrator for raw sockets — fall back gracefully
             return _subprocess_ping(ip)
         except Exception:
             return _subprocess_ping(ip)
@@ -64,15 +60,18 @@ except ImportError:
     def do_ping(ip, timeout=0.8):
         return _subprocess_ping(ip)
 
-# ── config ───────────────────────────────────────────────────────────────────
+# ── config ────────────────────────────────────────────────────────────────────
 
 def resource(name):
     return os.path.join(getattr(sys, "_MEIPASS", os.path.abspath(".")), name)
 
-CSV_FILE    = resource("coop_locations_large.csv")
-MAX_THREADS = 60
+CSV_FILE     = resource("coop_locations_large.csv")
+LAYOUT_FILE  = os.path.join(_base, "layout.json")
+MAX_THREADS  = 60
+PANEL_W      = 295
+STRIP_W      = 26
 
-# ── colour palette ───────────────────────────────────────────────────────────
+# ── colour palette ────────────────────────────────────────────────────────────
 
 BG_MAP    = "#f0f4fa"
 BG_PANEL  = "#f8f9fc"
@@ -140,8 +139,7 @@ def load_file(path):
 
 def _from_csv(path):
     rows = []
-    if not os.path.exists(path):
-        return rows
+    if not os.path.exists(path): return rows
     with open(path, newline="", encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             ip = r.get("IP", "").strip()
@@ -180,7 +178,7 @@ def sunflower(n, cx, cy, spacing=28):
 
 class Tooltip:
     def __init__(self, canvas):
-        self._cv = canvas
+        self._cv  = canvas
         self._win = None
 
     def show(self, text, rx, ry):
@@ -229,13 +227,9 @@ class MapCanvas(tk.Canvas):
         self.bind("<Motion>",          self._mouse_move)
         self.bind("<Leave>",           lambda _: self._tip.hide())
 
-    # ── lock ──────────────────────────────────────────────────────────────────
-
     def set_locked(self, locked):
         self._locked = locked
         self.configure(cursor="hand2" if locked else "fleur")
-
-    # ── coords ────────────────────────────────────────────────────────────────
 
     def _tc(self, lx, ly):
         w = self.winfo_width()  or 900
@@ -255,8 +249,6 @@ class MapCanvas(tk.Canvas):
             if d.get("oval_id") in hits:
                 return ip
         return None
-
-    # ── interaction ───────────────────────────────────────────────────────────
 
     def _b1_down(self, e):
         self._tip.hide()
@@ -327,8 +319,6 @@ class MapCanvas(tk.Canvas):
             else:
                 self._tip.hide()
 
-    # ── node data ─────────────────────────────────────────────────────────────
-
     def set_nodes(self, node_list, preserved_positions=None):
         old = {ip: (d["lx"], d["ly"]) for ip, d in self._nodes.items()}
         if preserved_positions:
@@ -361,77 +351,65 @@ class MapCanvas(tk.Canvas):
         w = self.winfo_width()  or 900
         h = self.winfo_height() or 600
 
-        # 1 ── dot grid background
+        # dot grid
         step = max(30, int(45 * self._zoom))
         ox   = int((self._pan[0] * self._zoom + w/2) % step)
         oy   = int((self._pan[1] * self._zoom + h/2) % step)
         for gx in range(ox - step, w + step, step):
             for gy in range(oy - step, h + step, step):
-                self.create_oval(gx-1, gy-1, gx+1, gy+1,
-                                 fill="#d1d9e6", outline="")
+                self.create_oval(gx-1, gy-1, gx+1, gy+1, fill="#d1d9e6", outline="")
 
-        # 2 ── source ripple rings (decorative circles around source)
+        # source ripple rings
         sx, sy = self._tc(0, 0)
         for ring_r in [60, 110, 170]:
             rr = ring_r * self._zoom
             self.create_oval(sx-rr, sy-rr, sx+rr, sy+rr,
                              outline="#c7d2e8", width=1, dash=(4, 6), fill="")
 
-        # 3 ── cluster halos
+        # cluster halos
         dept_nodes: dict[str, list] = {}
         for ip, d in self._nodes.items():
             if not d["is_source"]:
                 dept_nodes.setdefault(d["dept"], []).append(d)
 
-        dept_fill_cache = {}
         for dept, dnodes in dept_nodes.items():
-            cx_l = sum(n["lx"] for n in dnodes) / len(dnodes)
-            cy_l = sum(n["ly"] for n in dnodes) / len(dnodes)
+            cx_l  = sum(n["lx"] for n in dnodes) / len(dnodes)
+            cy_l  = sum(n["ly"] for n in dnodes) / len(dnodes)
             max_r = max((math.sqrt((n["lx"]-cx_l)**2 + (n["ly"]-cy_l)**2)
                          for n in dnodes), default=0)
-            halo_r = (max_r + 30) * self._zoom
+            halo_r   = (max_r + 30) * self._zoom
             hcx, hcy = self._tc(cx_l, cy_l)
-            fill_c = dnodes[0]["fill"]
-            dept_fill_cache[dept] = fill_c
-            light_c = hex_lighter(fill_c, 0.80)
-            border_c = hex_lighter(fill_c, 0.55)
-            self.create_oval(hcx - halo_r, hcy - halo_r,
-                             hcx + halo_r, hcy + halo_r,
-                             fill=light_c, outline=border_c,
+            fill_c   = dnodes[0]["fill"]
+            self.create_oval(hcx-halo_r, hcy-halo_r, hcx+halo_r, hcy+halo_r,
+                             fill=hex_lighter(fill_c, 0.80),
+                             outline=hex_lighter(fill_c, 0.55),
                              width=max(1, self._zoom * 1.2))
+            self._badge(hcx, hcy - halo_r - 4, dept, fill_c, hex_darker(fill_c, 0.3))
 
-            # dept badge at halo top
-            bx, by = hcx, hcy - halo_r - 4
-            self._badge(bx, by, dept, fill_c, hex_darker(fill_c, 0.3))
-
-        # 4 ── connection lines (source → each device)
+        # connection lines
         for ip, d in self._nodes.items():
             if d["is_source"]: continue
             lat = d.get("latency")
             tx, ty = self._tc(d["lx"], d["ly"])
-            col  = C_LINE_ON  if lat is not None else C_LINE_OFF
-            dash = ()         if lat is not None else (3, 8)
             self.create_line(sx, sy, tx, ty,
-                             fill=col, width=max(1, self._zoom * 0.8),
-                             dash=dash)
+                             fill=C_LINE_ON if lat is not None else C_LINE_OFF,
+                             width=max(1, self._zoom * 0.8),
+                             dash=() if lat is not None else (3, 8))
 
-        # 5 ── nodes
+        # nodes
         for ip, d in self._nodes.items():
             cx, cy = self._tc(d["lx"], d["ly"])
             self._draw_node(cx, cy, ip, d)
 
-        # 6 ── node labels (visible when zoomed in)
+        # node labels when zoomed in
         if self._zoom > 1.3:
             for ip, d in self._nodes.items():
                 if d["is_source"]: continue
                 cx, cy = self._tc(d["lx"], d["ly"])
-                r = self.R_DEV * self._zoom
-                self._node_label(cx, cy + r + 4, ip, d)
+                self._node_label(cx, cy + self.R_DEV * self._zoom + 4, ip, d)
 
-        # 7 ── legend card
         self._legend(w - 196, 14)
 
-        # 8 ── lock banner
         if self._locked:
             self.create_rectangle(0, 0, w, 28,
                                   fill="#fef9c3", outline="#fde047", width=1)
@@ -439,154 +417,100 @@ class MapCanvas(tk.Canvas):
                              text="🔒  LOCK MODE ON  —  drag any node to reposition it",
                              fill="#92400e", font=("Arial", 10, "bold"))
 
-    # ── rich node drawing ─────────────────────────────────────────────────────
-
     def _draw_node(self, cx, cy, ip, d):
         lat    = d.get("latency")
         is_src = d["is_source"]
         z      = self._zoom
-        r      = (self.R_SRC if is_src else self.R_DEV) * z
-        r      = max(r, 4)
+        r      = max((self.R_SRC if is_src else self.R_DEV) * z, 4)
 
         if is_src:
-            # 3-layer source node
-            self.create_oval(cx-(r+14*z), cy-(r+14*z),
-                             cx+(r+14*z), cy+(r+14*z),
-                             fill=C_SOURCE_GLOW, outline="#93c5fd",
-                             width=max(1, z))
-            self.create_oval(cx-(r+7*z), cy-(r+7*z),
-                             cx+(r+7*z), cy+(r+7*z),
-                             fill="#bfdbfe", outline=C_SOURCE_MID,
-                             width=max(1.5, z*1.5))
+            self.create_oval(cx-(r+14*z), cy-(r+14*z), cx+(r+14*z), cy+(r+14*z),
+                             fill=C_SOURCE_GLOW, outline="#93c5fd", width=max(1, z))
+            self.create_oval(cx-(r+7*z), cy-(r+7*z), cx+(r+7*z), cy+(r+7*z),
+                             fill="#bfdbfe", outline=C_SOURCE_MID, width=max(1.5, z*1.5))
             oid = self.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                   fill=C_SOURCE_CORE, outline="#1d4ed8",
-                                   width=max(2, z*2))
+                                   fill=C_SOURCE_CORE, outline="#1d4ed8", width=max(2, z*2))
             d["oval_id"] = oid
-            # inner white shine
-            self.create_oval(cx-(r*0.3), cy-(r*0.55),
-                             cx+(r*0.3), cy-(r*0.05),
-                             fill="white", outline="", width=0)
-            # labels
-            self.create_text(cx, cy - 2,
-                             text="YOU", fill="white",
+            self.create_oval(cx-(r*0.3), cy-(r*0.55), cx+(r*0.3), cy-(r*0.05),
+                             fill="white", outline="")
+            self.create_text(cx, cy-2, text="YOU", fill="white",
                              font=("Arial", max(7, int(9*z)), "bold"))
-            self.create_text(cx, cy + r + 6*z,
-                             text=ip, fill="#1e40af",
+            self.create_text(cx, cy+r+6*z, text=ip, fill="#1e40af",
                              font=("Arial", max(6, int(7*z)), "bold"))
         else:
-            fill  = d["fill"]
+            fill = d["fill"]
             if lat is not None:
-                # ── ONLINE ── layered glow
-                self.create_oval(cx-(r+9*z), cy-(r+9*z),
-                                 cx+(r+9*z), cy+(r+9*z),
-                                 fill=C_ONLINE_GLOW, outline=C_ONLINE_MID,
-                                 width=max(1, z * 0.8))
-                self.create_oval(cx-(r+4*z), cy-(r+4*z),
-                                 cx+(r+4*z), cy+(r+4*z),
-                                 fill=hex_lighter(fill, 0.6),
-                                 outline=C_ONLINE_MID,
-                                 width=max(1.2, z * 1.2))
+                self.create_oval(cx-(r+9*z), cy-(r+9*z), cx+(r+9*z), cy+(r+9*z),
+                                 fill=C_ONLINE_GLOW, outline=C_ONLINE_MID, width=max(1, z*0.8))
+                self.create_oval(cx-(r+4*z), cy-(r+4*z), cx+(r+4*z), cy+(r+4*z),
+                                 fill=hex_lighter(fill, 0.6), outline=C_ONLINE_MID,
+                                 width=max(1.2, z*1.2))
                 oid = self.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                       fill=fill, outline=C_ONLINE_CORE,
-                                       width=max(2, z*2))
-                # latency micro-badge (only if space)
+                                       fill=fill, outline=C_ONLINE_CORE, width=max(2, z*2))
                 if z > 1.1:
                     ms = f"{lat}ms"
-                    bw = len(ms) * max(4, int(5.5 * z))
-                    bh = max(10, int(12 * z))
-                    self.create_rectangle(cx - bw/2, cy - r - bh - 2*z,
-                                          cx + bw/2, cy - r - 2*z,
-                                          fill=C_ONLINE_CORE, outline="",
-                                          width=0)
-                    self.create_text(cx, cy - r - bh/2 - 2*z,
-                                     text=ms, fill="white",
+                    bw = len(ms) * max(4, int(5.5*z))
+                    bh = max(10, int(12*z))
+                    self.create_rectangle(cx-bw/2, cy-r-bh-2*z, cx+bw/2, cy-r-2*z,
+                                          fill=C_ONLINE_CORE, outline="")
+                    self.create_text(cx, cy-r-bh/2-2*z, text=ms, fill="white",
                                      font=("Arial", max(5, int(6*z)), "bold"))
             else:
-                # ── OFFLINE ── muted glow
-                self.create_oval(cx-(r+6*z), cy-(r+6*z),
-                                 cx+(r+6*z), cy+(r+6*z),
-                                 fill=C_OFFLINE_GLOW, outline="#fca5a5",
-                                 width=max(1, z * 0.8))
+                self.create_oval(cx-(r+6*z), cy-(r+6*z), cx+(r+6*z), cy+(r+6*z),
+                                 fill=C_OFFLINE_GLOW, outline="#fca5a5", width=max(1, z*0.8))
                 oid = self.create_oval(cx-r, cy-r, cx+r, cy+r,
-                                       fill="#e5e7eb", outline=C_OFFLINE_CORE,
-                                       width=max(2, z*2))
-                # X mark
+                                       fill="#e5e7eb", outline=C_OFFLINE_CORE, width=max(2, z*2))
                 o = r * 0.38
                 self.create_line(cx-o, cy-o, cx+o, cy+o,
-                                 fill=C_OFFLINE_CORE,
-                                 width=max(1.5, z*1.5), capstyle="round")
+                                 fill=C_OFFLINE_CORE, width=max(1.5, z*1.5), capstyle="round")
                 self.create_line(cx+o, cy-o, cx-o, cy+o,
-                                 fill=C_OFFLINE_CORE,
-                                 width=max(1.5, z*1.5), capstyle="round")
+                                 fill=C_OFFLINE_CORE, width=max(1.5, z*1.5), capstyle="round")
 
             d["oval_id"] = oid
-
-            # white shine spot (online only)
             if lat is not None:
-                self.create_oval(cx-(r*0.28), cy-(r*0.55),
-                                 cx+(r*0.28), cy-(r*0.05),
-                                 fill="white", outline="", width=0)
-
-            # drag handle dot when locked
+                self.create_oval(cx-(r*0.28), cy-(r*0.55), cx+(r*0.28), cy-(r*0.05),
+                                 fill="white", outline="")
             if self._locked:
                 self.create_oval(cx-2.5, cy-2.5, cx+2.5, cy+2.5,
                                  fill="white", outline=FG_SUB, width=1)
 
     def _node_label(self, cx, by, ip, d):
-        """Pill label below a device node."""
         z    = self._zoom
         text = d["name"][:16] if z > 1.8 else ip
-        fs   = max(6, int(7.5 * z))
-        font = ("Arial", fs)
-        # measure roughly
-        tw = len(text) * fs * 0.62
-        th = fs + 6
-        px, py = 4, 2
-        self.create_rectangle(cx - tw/2 - px, by,
-                               cx + tw/2 + px, by + th + py*2,
+        fs   = max(6, int(7.5*z))
+        tw   = len(text) * fs * 0.62
+        th   = fs + 6
+        self.create_rectangle(cx-tw/2-4, by, cx+tw/2+4, by+th+4,
                                fill="white", outline=SEP_COL, width=1)
-        self.create_text(cx, by + th/2 + py,
-                         text=text, fill=FG_TEXT, font=font)
+        self.create_text(cx, by+th/2+2, text=text, fill=FG_TEXT,
+                         font=("Arial", fs))
 
     def _badge(self, cx, by, text, bg, fg):
-        """Department name badge (pill at top of cluster halo)."""
         z    = self._zoom
-        fs   = max(7, int(8 * z))
-        font = ("Arial", fs, "bold")
+        fs   = max(7, int(8*z))
         tw   = len(text) * fs * 0.68
         th   = fs + 6
-        px, py = 6, 3
-        self.create_rectangle(cx - tw/2 - px, by - th - py,
-                               cx + tw/2 + px, by,
+        self.create_rectangle(cx-tw/2-6, by-th-3, cx+tw/2+6, by,
                                fill=bg, outline=hex_darker(bg, 0.15), width=1)
-        self.create_text(cx, by - th/2 - py/2,
-                         text=text, fill="white", font=font)
+        self.create_text(cx, by-th/2-1, text=text, fill="white",
+                         font=("Arial", fs, "bold"))
 
     def _legend(self, x, y):
-        """Styled legend card."""
         pad = 12; lh = 24; bw = 182; bh = pad*2 + 16 + lh*3
-        # shadow
-        self.create_rectangle(x+3, y+3, x+bw+3, y+bh+3,
-                              fill="#c8d0dc", outline="")
-        # card
-        self.create_rectangle(x, y, x+bw, y+bh,
-                              fill="white", outline=SEP_COL, width=1)
-        self.create_text(x+pad, y+pad,
-                         text="LEGEND", fill=ACCENT,
+        self.create_rectangle(x+3, y+3, x+bw+3, y+bh+3, fill="#c8d0dc", outline="")
+        self.create_rectangle(x, y, x+bw, y+bh, fill="white", outline=SEP_COL, width=1)
+        self.create_text(x+pad, y+pad, text="LEGEND", fill=ACCENT,
                          font=("Arial", 9, "bold"), anchor="nw")
-        items = [
+        for i, (core, glow, lbl) in enumerate([
             (C_ONLINE_CORE,  C_ONLINE_GLOW,  "Online"),
             (C_OFFLINE_CORE, C_OFFLINE_GLOW, "Offline"),
             (C_SOURCE_CORE,  C_SOURCE_GLOW,  "Source  (your machine)"),
-        ]
-        for i, (core, glow, lbl) in enumerate(items):
-            oy = y + pad + 16 + lh * i
-            self.create_oval(x+pad,     oy+3,  x+pad+16, oy+19,
+        ]):
+            oy = y + pad + 16 + lh*i
+            self.create_oval(x+pad, oy+3, x+pad+16, oy+19,
                              fill=glow, outline=core, width=2)
-            self.create_oval(x+pad+3,   oy+6,  x+pad+13, oy+16,
-                             fill=core, outline="")
-            self.create_text(x+pad+22, oy+4,
-                             text=lbl, fill=FG_TEXT,
+            self.create_oval(x+pad+3, oy+6, x+pad+13, oy+16, fill=core, outline="")
+            self.create_text(x+pad+22, oy+4, text=lbl, fill=FG_TEXT,
                              font=("Arial", 9), anchor="nw")
 
 # ── main application ──────────────────────────────────────────────────────────
@@ -597,25 +521,28 @@ class App(tk.Tk):
         self.title("Network Map Monitor")
         self.geometry("1380x800")
         self.minsize(900, 560)
-        self.configure(bg=BG_PANEL)
+        self.configure(bg=BG_MAP)
 
-        self._source_ip = get_local_ip()
-        self._systems   = {}
-        self._devices   = []
-        self._executor  = ThreadPoolExecutor(max_workers=MAX_THREADS)
-        self._search    = tk.StringVar()
-        self._dept_var  = tk.StringVar(value="All Departments")
-        self._locked    = False
-        self._scanning  = False
+        self._source_ip   = get_local_ip()
+        self._systems     = {}
+        self._devices     = []
+        self._executor    = ThreadPoolExecutor(max_workers=MAX_THREADS)
+        self._search      = tk.StringVar()
+        self._dept_var    = tk.StringVar(value="All Departments")
+        self._locked      = False
+        self._scanning    = False
+        self._panel_open  = False
+        self._hide_job    = None
 
         self._search.trace_add("write",   lambda *_: self._refresh_table())
         self._dept_var.trace_add("write", lambda *_: self._refresh_table())
 
         self._build_ui()
+        self._hover_loop()
         self._load(CSV_FILE)
         self._schedule_scan()
 
-    # ── UI ────────────────────────────────────────────────────────────────────
+    # ── UI layout ─────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         style = ttk.Style(self)
@@ -632,53 +559,87 @@ class App(tk.Tk):
         style.configure("TButton",   background="#e5e7eb", foreground=FG_TEXT, padding=(6,5))
         style.map("TButton", background=[("active", "#d1d5db")])
 
-        left = tk.Frame(self, bg=BG_PANEL, width=295)
-        left.pack(side="left", fill="y")
-        left.pack_propagate(False)
+        # ── strip (always visible, hover target) ──────────────────────────────
+        self._strip = tk.Frame(self, bg=ACCENT, width=STRIP_W)
+        self._strip.pack(side="left", fill="y")
+        self._strip.pack_propagate(False)
 
-        def lbl(parent, text, color=FG_TEXT, size=11, bold=False):
-            return tk.Label(parent, text=text, bg=BG_PANEL, fg=color,
+        self._arrow = tk.Label(self._strip, text="›", bg=ACCENT, fg="white",
+                               font=("Arial", 15, "bold"), cursor="hand2")
+        self._arrow.pack(expand=True)
+
+        for w in (self._strip, self._arrow):
+            w.bind("<Enter>", lambda e: self._open_panel())
+
+        # ── sliding panel (hidden at width=0 initially) ────────────────────
+        self._panel = tk.Frame(self, bg=BG_PANEL, width=0)
+        self._panel.pack(side="left", fill="y")
+        self._panel.pack_propagate(False)
+
+        # ── map ────────────────────────────────────────────────────────────
+        self._map = MapCanvas(self)
+        self._map.pack(side="left", fill="both", expand=True)
+
+        # populate the panel content
+        self._build_panel()
+
+    def _build_panel(self):
+        p = self._panel
+
+        def lbl(text, color=FG_TEXT, size=11, bold=False):
+            return tk.Label(p, text=text, bg=BG_PANEL, fg=color,
                             font=("Arial", size, "bold" if bold else "normal"),
                             anchor="w", padx=12)
 
-        lbl(left, "Network Map Monitor", ACCENT, 14, bold=True).pack(fill="x", pady=(12,2))
-        self._lbl_src = lbl(left, f"Source IP:  {self._source_ip}", FG_SUB, 10)
+        lbl("Network Map Monitor", ACCENT, 14, bold=True).pack(fill="x", pady=(12,2))
+        self._lbl_src = lbl(f"Source:  {self._source_ip}", FG_SUB, 10)
         self._lbl_src.pack(fill="x")
-        ttk.Separator(left).pack(fill="x", pady=8, padx=8)
-        self._lbl_stats = lbl(left, "Loading…", FG_TEXT, 11, bold=True)
+        ttk.Separator(p).pack(fill="x", pady=8, padx=8)
+
+        self._lbl_stats = lbl("Loading…", FG_TEXT, 11, bold=True)
         self._lbl_stats.pack(fill="x")
-        self._lbl_time = lbl(left, "", FG_SUB, 9)
+        self._lbl_time = lbl("", FG_SUB, 9)
         self._lbl_time.pack(fill="x", pady=(0,6))
 
-        tk.Label(left, text="Search", bg=BG_PANEL, fg=FG_SUB,
+        tk.Label(p, text="Search", bg=BG_PANEL, fg=FG_SUB,
                  font=("Arial",9), anchor="w", padx=12).pack(fill="x")
-        ttk.Entry(left, textvariable=self._search).pack(fill="x", padx=10, pady=(0,6))
-        tk.Label(left, text="Department", bg=BG_PANEL, fg=FG_SUB,
+        ttk.Entry(p, textvariable=self._search).pack(fill="x", padx=10, pady=(0,6))
+
+        tk.Label(p, text="Department", bg=BG_PANEL, fg=FG_SUB,
                  font=("Arial",9), anchor="w", padx=12).pack(fill="x")
-        self._dept_cb = ttk.Combobox(left, textvariable=self._dept_var, state="readonly")
+        self._dept_cb = ttk.Combobox(p, textvariable=self._dept_var, state="readonly")
         self._dept_cb.pack(fill="x", padx=10, pady=(0,8))
 
-        for txt, cmd in [("⟳  Scan Now", self._scan),
+        for txt, cmd in [("⟳  Scan Now",         self._scan),
                           ("📂  Load CSV / Excel", self._load_dialog),
-                          ("💾  Export CSV", self._export),
-                          ("⊡  Fit Map", lambda: self._map.fit_view())]:
-            ttk.Button(left, text=txt, command=cmd).pack(fill="x", padx=10, pady=2)
+                          ("⊡  Fit Map",           lambda: self._map.fit_view()),
+                          ("📤  Export CSV",        self._export)]:
+            ttk.Button(p, text=txt, command=cmd).pack(fill="x", padx=10, pady=2)
+
+        # Save Layout button
+        self._save_btn = tk.Button(
+            p, text="💾  Save Layout",
+            bg="#e5e7eb", fg=FG_TEXT,
+            font=("Arial", 11), relief="flat", bd=0,
+            padx=10, pady=5, cursor="hand2",
+            command=self._save_layout)
+        self._save_btn.pack(fill="x", padx=10, pady=2)
 
         self._lock_btn = tk.Button(
-            left, text="🔓  Lock Map  (OFF)",
+            p, text="🔓  Lock Map  (OFF)",
             bg=LOCK_OFF_BG, fg=LOCK_OFF_FG,
             font=("Arial", 11, "bold"),
             relief="flat", bd=0, padx=10, pady=6,
             cursor="hand2", command=self._toggle_lock)
         self._lock_btn.pack(fill="x", padx=10, pady=(6,2))
 
-        ttk.Separator(left).pack(fill="x", pady=8, padx=8)
-        tk.Label(left, text="Double-click row → jump to node",
+        ttk.Separator(p).pack(fill="x", pady=8, padx=8)
+        tk.Label(p, text="Double-click row → jump to node",
                  bg=BG_PANEL, fg=FG_SUB, font=("Arial",9),
                  anchor="w", padx=12).pack(fill="x", pady=(0,4))
 
         cols = ("IP","Name","Latency","Status")
-        self._tree = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
+        self._tree = ttk.Treeview(p, columns=cols, show="headings", selectmode="browse")
         for c in cols:
             self._tree.heading(c, text=c)
             self._tree.column(c, width=60, anchor="center")
@@ -686,14 +647,45 @@ class App(tk.Tk):
         self._tree.column("Name", width=100, anchor="w")
         self._tree.tag_configure("online",  background="#dcfce7", foreground="#166534")
         self._tree.tag_configure("offline", background="#fee2e2", foreground="#991b1b")
-        sb = ttk.Scrollbar(left, orient="vertical", command=self._tree.yview)
+        sb = ttk.Scrollbar(p, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=sb.set)
         self._tree.pack(side="left", fill="both", expand=True, padx=(10,0), pady=(0,10))
         sb.pack(side="left", fill="y", pady=(0,10), padx=(0,6))
         self._tree.bind("<Double-1>", self._jump_to)
 
-        self._map = MapCanvas(self)
-        self._map.pack(side="left", fill="both", expand=True)
+    # ── hover panel logic ─────────────────────────────────────────────────────
+
+    def _open_panel(self):
+        if self._hide_job:
+            self.after_cancel(self._hide_job)
+            self._hide_job = None
+        if not self._panel_open:
+            self._panel.config(width=PANEL_W)
+            self._arrow.config(text="‹")
+            self._panel_open = True
+
+    def _close_panel(self):
+        self._panel.config(width=0)
+        self._arrow.config(text="›")
+        self._panel_open = False
+        self._hide_job   = None
+
+    def _hover_loop(self):
+        """Poll mouse position every 120ms — close panel when mouse leaves the strip+panel zone."""
+        if self._panel_open:
+            try:
+                mx = self.winfo_pointerx() - self.winfo_rootx()
+                edge = STRIP_W + PANEL_W + 12
+                if mx > edge or mx < 0:
+                    if not self._hide_job:
+                        self._hide_job = self.after(350, self._close_panel)
+                else:
+                    if self._hide_job:
+                        self.after_cancel(self._hide_job)
+                        self._hide_job = None
+            except Exception:
+                pass
+        self.after(120, self._hover_loop)
 
     # ── lock ──────────────────────────────────────────────────────────────────
 
@@ -707,6 +699,31 @@ class App(tk.Tk):
             self._lock_btn.config(text="🔓  Lock Map  (OFF)",
                                   bg=LOCK_OFF_BG, fg=LOCK_OFF_FG)
         self._map._redraw()
+
+    # ── save / load layout ────────────────────────────────────────────────────
+
+    def _save_layout(self):
+        positions = {ip: [d["lx"], d["ly"]] for ip, d in self._map._nodes.items()}
+        try:
+            with open(LAYOUT_FILE, "w") as f:
+                json.dump({"version": 1, "positions": positions}, f, indent=2)
+            self._save_btn.config(text="✓  Layout Saved!", bg="#dcfce7", fg="#166534")
+            self.after(2000, lambda: self._save_btn.config(
+                text="💾  Save Layout", bg="#e5e7eb", fg=FG_TEXT))
+        except Exception as ex:
+            self._save_btn.config(text=f"✗  Error: {ex}", bg="#fee2e2", fg="#991b1b")
+            self.after(3000, lambda: self._save_btn.config(
+                text="💾  Save Layout", bg="#e5e7eb", fg=FG_TEXT))
+
+    def _load_layout(self):
+        if not os.path.exists(LAYOUT_FILE):
+            return {}
+        try:
+            with open(LAYOUT_FILE) as f:
+                data = json.load(f)
+            return {ip: tuple(pos) for ip, pos in data.get("positions", {}).items()}
+        except Exception:
+            return {}
 
     # ── data ──────────────────────────────────────────────────────────────────
 
@@ -724,7 +741,11 @@ class App(tk.Tk):
         self._scan()
 
     def _build_map(self):
-        preserved = {ip: (d["lx"], d["ly"]) for ip, d in self._map._nodes.items()}
+        # saved positions are the baseline; in-memory (dragged) positions override them
+        saved     = self._load_layout()
+        in_memory = {ip: (d["lx"], d["ly"]) for ip, d in self._map._nodes.items()}
+        preserved = {**saved, **in_memory}
+
         self._systems = {}
         depts      = sorted({d["Department"] for d in self._devices})
         dept_color = {d: DEPT_COLORS[i % len(DEPT_COLORS)] for i, d in enumerate(depts)}
@@ -732,11 +753,11 @@ class App(tk.Tk):
         self._dept_cb["values"] = ["All Departments"] + depts
         self._dept_var.set("All Departments")
 
-        n_depts = len(depts)
-        RING    = max(260, n_depts * 60)
-        node_list = [{"ip": self._source_ip, "name":"You","dept":"Source",
-                      "location":"This machine","fill":C_SOURCE_CORE,
-                      "lx":0,"ly":0,"is_source":True}]
+        n_depts   = len(depts)
+        RING      = max(260, n_depts * 60)
+        node_list = [{"ip": self._source_ip, "name":"You", "dept":"Source",
+                      "location":"This machine", "fill":C_SOURCE_CORE,
+                      "lx":0, "ly":0, "is_source":True}]
         self._systems[self._source_ip] = {"name":"You","dept":"Source",
                                            "location":"","latency":1.0}
 
@@ -780,7 +801,8 @@ class App(tk.Tk):
             try:
                 ip, lat = f.result()
                 self._systems[ip]["latency"] = lat
-            except Exception: pass
+            except Exception:
+                pass
         self._scanning = False
         self.after(0, self._on_done)
 
@@ -788,7 +810,7 @@ class App(tk.Tk):
         for ip, d in self._systems.items():
             self._map.update_status(ip, d["latency"])
         self._map._redraw()
-        online = sum(1 for ip,d in self._systems.items()
+        online = sum(1 for ip, d in self._systems.items()
                      if ip != self._source_ip and d["latency"] is not None)
         total  = len(self._systems) - 1
         self._lbl_stats.config(
