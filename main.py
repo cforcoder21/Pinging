@@ -148,7 +148,8 @@ def _from_csv(path):
                              "Name": r.get("Name", "").strip(),
                              "Department": r.get("Department", "Unknown").strip(),
                              "Location": r.get("Location", "").strip(),
-                             "Parent IP": r.get("Parent IP", "").strip()})
+                             "Parent IP": r.get("Parent IP", "").strip(),
+                             "Zone": r.get("Zone", "").strip()})
     return rows
 
 def _from_xlsx(path):
@@ -164,8 +165,45 @@ def _from_xlsx(path):
                          "Name": str(row[col.get("Name", 1)] or "").strip(),
                          "Department": str(row[col.get("Department", 2)] or "Unknown").strip(),
                          "Location": str(row[col.get("Location", 3)] or "").strip() if "Location" in col else "",
-                         "Parent IP": str(row[col.get("Parent IP", -1)] or "").strip() if "Parent IP" in col else ""})
+                         "Parent IP": str(row[col.get("Parent IP", -1)] or "").strip() if "Parent IP" in col else "",
+                         "Zone": str(row[col.get("Zone", -1)] or "").strip() if "Zone" in col else ""})
     return rows
+
+def _tree_layout(source_ip, devices):
+    """Left-to-right tree: source at col 0, children at col+1, spread vertically."""
+    H_STEP = 195
+    V_STEP = 60
+
+    all_ips  = set(d["IP"] for d in devices) | {source_ip}
+    children = {ip: [] for ip in all_ips}
+
+    for d in devices:
+        ip  = d["IP"]
+        pid = (d.get("Parent IP") or "").strip()
+        if pid and pid in all_ips:
+            children[pid].append(ip)
+        else:
+            children[source_ip].append(ip)
+
+    def leaf_count(ip):
+        ch = children.get(ip, [])
+        return max(1, sum(leaf_count(c) for c in ch))
+
+    positions = {}
+
+    def layout(ip, col, row_offset, row_span):
+        positions[ip] = (col * H_STEP, (row_offset + row_span / 2) * V_STEP)
+        ch = children.get(ip, [])
+        r  = row_offset
+        for c in ch:
+            span = leaf_count(c)
+            layout(c, col + 1, r, span)
+            r += span
+
+    total = leaf_count(source_ip)
+    layout(source_ip, 0, 0, total)
+    sx, sy = positions.get(source_ip, (0, 0))
+    return {ip: (x - sx, y - sy) for ip, (x, y) in positions.items()}
 
 def sunflower(n, cx, cy, spacing=28):
     golden = (1 + math.sqrt(5)) / 2
@@ -336,7 +374,8 @@ class MapCanvas(tk.Canvas):
                 "dept": d["dept"],
                 "location": d.get("location", ""),
                 "is_source": d.get("is_source", False),
-                "parent_ip": d.get("parent_ip"),   # None → direct child of source
+                "parent_ip": d.get("parent_ip"),
+                "zone": d.get("zone", ""),
                 "latency": None,
                 "oval_id": None,
             }
@@ -379,42 +418,37 @@ class MapCanvas(tk.Canvas):
         src  = next((d for d in self._nodes.values() if d["is_source"]), None)
         sx, sy = self._tc(src["lx"], src["ly"]) if src else self._tc(0, 0)
 
-        # ── zone boxes (rectangular, like the reference diagram) ─────────────
-        dept_nodes: dict[str, list] = {}
+        # ── zone boxes (only for nodes that have an explicit Zone value) ────────
+        _ZONE_BORDERS = ["#1a1a2e", "#0f766e", "#1e40af", "#6b21a8",
+                         "#9a3412", "#065f46", "#7c2d12"]
+        zone_nodes: dict[str, list] = {}
         for ip, d in self._nodes.items():
-            if not d["is_source"]:
-                dept_nodes.setdefault(d["dept"], []).append(d)
+            z_name = d.get("zone", "")
+            if z_name:
+                zone_nodes.setdefault(z_name, []).append(d)
 
-        for dept, dnodes in dept_nodes.items():
-            coords = [self._tc(n["lx"], n["ly"]) for n in dnodes]
+        for zi, (zone_name, znodes) in enumerate(zone_nodes.items()):
+            coords = [self._tc(n["lx"], n["ly"]) for n in znodes]
             cxs    = [c[0] for c in coords]
             cys    = [c[1] for c in coords]
-            ebw    = max(n["_bw"] for n in dnodes)
-            ebh    = max(n["_bh"] for n in dnodes)
-            pad    = max(16, 20 * self._zoom)
-            x0, y0 = min(cxs) - ebw - pad, min(cys) - ebh - pad
-            x1, y1 = max(cxs) + ebw + pad, max(cys) + ebh + pad
+            ebw    = max(n["_bw"] for n in znodes)
+            ebh    = max(n["_bh"] for n in znodes)
+            pad    = max(22, 30 * self._zoom)
+            x0     = min(cxs) - ebw - pad
+            y0     = min(cys) - ebh - pad
+            x1     = max(cxs) + ebw + pad
+            y1     = max(cys) + ebh + pad
+            bcol   = _ZONE_BORDERS[zi % len(_ZONE_BORDERS)]
+            bw_px  = max(2, self._zoom * 2.2)
 
-            fill_c   = dnodes[0]["fill"]
-            light_c  = hex_lighter(fill_c, 0.88)
-            border_c = fill_c
-
-            # shadow
-            self.create_rectangle(x0+3, y0+3, x1+3, y1+3, fill="#c8d0dc", outline="")
-            # zone box — dashed border like the reference map
             self.create_rectangle(x0, y0, x1, y1,
-                                  fill=light_c, outline=border_c,
-                                  width=max(1.5, self._zoom * 1.8),
-                                  dash=(8, 4))
-            # dept label (top-left corner, inside box)
-            fs_z = max(7, int(8 * self._zoom))
-            self.create_rectangle(x0, y0, x0 + len(dept)*fs_z*0.72 + 14, y0 + fs_z + 8,
-                                  fill=border_c, outline="")
-            self.create_text(x0 + 7, y0 + 4, text=dept, fill="white",
+                                  fill="#fafcff", outline=bcol, width=bw_px)
+            fs_z = max(7, int(9 * self._zoom))
+            self.create_text(x0 + 8, y0 + 5, text=zone_name, fill="#dc2626",
                              font=("Arial", fs_z, "bold"), anchor="nw")
 
         # ── topology lines — orthogonal routing ──────────────────────────────
-        lw = max(1.5, self._zoom * 1.4)
+        lw = max(1.0, self._zoom * 1.1)
         for ip, d in self._nodes.items():
             if d["is_source"]: continue
             tx, ty = self._tc(d["lx"], d["ly"])
@@ -468,7 +502,7 @@ class MapCanvas(tk.Canvas):
             self._draw_node(cx, cy, ip, d)
 
         # ── legend ────────────────────────────────────────────────────────────
-        self._legend(w - 212, 14)
+        self._legend(14, 14)
 
         # ── lock banner ───────────────────────────────────────────────────────
         if self._locked:
@@ -498,87 +532,93 @@ class MapCanvas(tk.Canvas):
         name   = "YOU" if is_src else d["name"]
         fs     = max(7, int((10 if is_src else 9) * z))
 
-        # colour scheme
         if is_src:
-            bg, border, text_c, dot_c = "#eff6ff", "#2563eb", "#1e40af", "#2563eb"
+            fill_bg = "#eff6ff"
+            border  = "#2563eb"
+            bord_w  = max(1.5, z * 1.5)
+            text_c  = "#1e40af"
+            dot_c   = "#2563eb"
         elif lat is not None:
-            bg, border, text_c, dot_c = "#f0fdfa", "#0d9488", "#134e4a", "#16a34a"
+            fill_bg = "white"
+            border  = "#d1d5db"
+            bord_w  = max(1, z)
+            text_c  = "#111827"
+            dot_c   = "#16a34a"
         else:
-            bg, border, text_c, dot_c = "#f9fafb", "#9ca3af", "#6b7280", "#dc2626"
+            fill_bg = "white"
+            border  = "#e5e7eb"
+            bord_w  = max(1, z)
+            text_c  = "#9ca3af"
+            dot_c   = "#dc2626"
 
-        # drop-shadow
-        self.create_rectangle(cx-bw+2, cy-bh+2, cx+bw+2, cy+bh+2,
-                              fill="#c8d0dc", outline="")
-        # main box
+        # Subtle shadow
+        self.create_rectangle(cx-bw+1.5, cy-bh+1.5, cx+bw+1.5, cy+bh+1.5,
+                              fill="#dde3ec", outline="")
+        # Main box — clean white rectangle
         oid = self.create_rectangle(cx-bw, cy-bh, cx+bw, cy+bh,
-                                    fill=bg, outline=border,
-                                    width=max(1.5, z * 1.5))
+                                    fill=fill_bg, outline=border, width=bord_w)
         d["oval_id"] = oid
 
-        # left accent bar
-        bar = max(3, 4 * z)
-        self.create_rectangle(cx-bw, cy-bh, cx-bw+bar, cy+bh,
-                              fill=border, outline="")
+        # Tiny status dot (top-right corner only)
+        dr = max(2.5, 3 * z)
+        self.create_oval(cx+bw-dr*2-1.5*z, cy-bh+1.5*z,
+                         cx+bw-1.5*z,       cy-bh+dr*2+1.5*z,
+                         fill=dot_c, outline="white", width=max(0.5, z*0.5))
 
-        # status dot (top-right corner)
-        dr = max(3, 3.5 * z)
-        self.create_oval(cx+bw-dr*2-2*z, cy-bh+2*z,
-                         cx+bw-2*z,       cy-bh+dr*2+2*z,
-                         fill=dot_c, outline="white", width=max(1, z*0.8))
+        # Device name centred in box — no accent bar offset
+        self.create_text(cx, cy, text=name, fill=text_c,
+                         font=("Arial", fs, "bold" if is_src else "normal"),
+                         width=int(bw * 2 - 10))
 
-        # latency badge (only when zoomed in and online)
-        if lat is not None and z > 1.1:
-            ms   = f"{lat}ms"
-            mfs  = max(5, int(6*z))
-            mbw  = len(ms) * mfs * 0.72 + 6
-            mbh  = mfs + 4
+        # Latency badge when online and zoomed in
+        if lat is not None and z > 1.2:
+            ms  = f"{lat}ms"
+            mfs = max(5, int(6 * z))
+            mbw = len(ms) * mfs * 0.72 + 6
+            mbh = mfs + 4
             self.create_rectangle(cx-mbw/2, cy+bh+1, cx+mbw/2, cy+bh+mbh+2,
                                   fill="#0d9488", outline="")
             self.create_text(cx, cy+bh+mbh/2+2, text=ms, fill="white",
                              font=("Arial", mfs, "bold"))
 
-        # device name text
-        self.create_text(cx + bar/2, cy, text=name, fill=text_c,
-                         font=("Arial", fs, "bold" if is_src else "normal"),
-                         width=int(bw*2 - bar - 4))
-
-        # source IP below box
+        # Source IP label below box
         if is_src:
             self.create_text(cx, cy+bh+5*z, text=ip, fill="#1e40af",
                              font=("Arial", max(6, int(7*z))))
 
-        # drag handle when locked
+        # Drag handle when locked
         if self._locked and not is_src:
-            self.create_oval(cx-2.5, cy-2.5, cx+2.5, cy+2.5,
+            self.create_oval(cx-2, cy-2, cx+2, cy+2,
                              fill="white", outline="#9ca3af", width=1)
 
     def _legend(self, x, y):
-        """Cable colour indication legend — matches the reference diagram style."""
-        pad = 12; lh = 22; bw = 198
+        """Cable colour indication legend — light blue bordered box, top-left."""
+        pad = 10; lh = 20; bw = 196
         items = [
-            ("#0d9488", (),      "Path online   (solid teal)"),
-            ("#dc2626", (6, 4),  "Path broken  (dashed red)"),
-            ("#2563eb", (),      "Source  — your machine"),
+            ("#0d9488", (),      "Path online  (teal solid)"),
+            ("#dc2626", (6, 4),  "Path broken  (red dashed)"),
+            ("#2563eb", (),      "Source — this machine"),
         ]
-        bh = pad * 2 + 18 + lh * len(items)
+        bh = pad * 2 + 17 + lh * len(items)
 
-        # shadow + card
-        self.create_rectangle(x+3, y+3, x+bw+3, y+bh+3, fill="#c8d0dc", outline="")
-        self.create_rectangle(x, y, x+bw, y+bh, fill="white", outline=SEP_COL, width=1)
-
-        # title bar
-        self.create_rectangle(x, y, x+bw, y+18, fill="#f1f5f9", outline=SEP_COL, width=1)
+        # White card with light-blue border (matches reference diagram)
+        self.create_rectangle(x, y, x+bw, y+bh,
+                              fill="white", outline="#93c5fd",
+                              width=max(1.5, self._zoom * 0.8))
+        # Title band
+        self.create_rectangle(x+1, y+1, x+bw-1, y+18,
+                              fill="#eff6ff", outline="")
         self.create_text(x+pad, y+3, text="Cable colour indication",
-                         fill=FG_TEXT, font=("Arial", 8, "bold"), anchor="nw")
+                         fill="#1e40af", font=("Arial", 8, "bold"), anchor="nw")
 
         for i, (col, dash, lbl) in enumerate(items):
-            oy  = y + pad + 18 + lh * i
+            oy  = y + pad + 17 + lh * i
             lx1 = x + pad
-            lx2 = x + pad + 36
+            lx2 = x + pad + 32
             ly  = oy + lh // 2
-            self.create_line(lx1, ly, lx2, ly, fill=col, width=2.5, dash=dash,
+            self.create_line(lx1, ly, lx2, ly, fill=col, width=2, dash=dash,
                              capstyle="round")
-            self.create_text(lx2 + 8, ly - 1, text=lbl, fill=FG_TEXT,
+            self.create_text(lx2 + 7, ly - 1, text=lbl, fill=FG_TEXT,
                              font=("Arial", 8), anchor="w")
 
 # ── main application ──────────────────────────────────────────────────────────
@@ -824,7 +864,6 @@ class App(tk.Tk):
         self._scan()
 
     def _build_map(self):
-        # saved positions are the baseline; in-memory (dragged) positions override them
         saved     = self._load_layout()
         in_memory = {ip: (d["lx"], d["ly"]) for ip, d in self._map._nodes.items()}
         preserved = {**saved, **in_memory}
@@ -836,34 +875,29 @@ class App(tk.Tk):
         self._dept_cb["values"] = ["All Departments"] + depts
         self._dept_var.set("All Departments")
 
-        n_depts   = len(depts)
-        RING      = max(260, n_depts * 60)
-        node_list = [{"ip": self._source_ip, "name":"You", "dept":"Source",
-                      "location":"This machine", "fill":C_SOURCE_CORE,
-                      "lx":0, "ly":0, "is_source":True}]
-        self._systems[self._source_ip] = {"name":"You","dept":"Source",
-                                           "location":"","latency":1.0}
+        positions = _tree_layout(self._source_ip, self._devices)
 
-        dept_groups = {}
+        node_list = [{"ip": self._source_ip, "name": "YOU", "dept": "Source",
+                      "location": "This machine", "fill": C_SOURCE_CORE,
+                      "lx": 0, "ly": 0, "is_source": True, "parent_ip": None,
+                      "zone": ""}]
+        self._systems[self._source_ip] = {"name": "YOU", "dept": "Source",
+                                           "location": "", "latency": 1.0}
+
         for dev in self._devices:
-            dept_groups.setdefault(dev["Department"], []).append(dev)
-
-        for di, (dept, devs) in enumerate(dept_groups.items()):
-            angle = 2*math.pi*di/n_depts - math.pi/2
-            dcx   = RING * math.cos(angle)
-            dcy   = RING * math.sin(angle)
-            n     = len(devs)
-            sp    = max(16, min(28, 160/math.sqrt(n+1)))
-            for dev, (nx, ny) in zip(devs, sunflower(n, dcx, dcy, sp)):
-                ip  = dev["IP"]
-                pid = dev.get("Parent IP", "").strip() or None
-                self._systems[ip] = {"name":dev["Name"],"dept":dept,
-                                      "location":dev["Location"],"latency":None}
-                node_list.append({"ip":ip,"name":dev["Name"],"dept":dept,
-                                  "location":dev["Location"],
-                                  "fill":dept_color[dept],
-                                  "lx":nx,"ly":ny,"is_source":False,
-                                  "parent_ip": pid})
+            ip  = dev["IP"]
+            pid = dev.get("Parent IP", "").strip() or None
+            lx, ly = positions.get(ip, (0, 0))
+            self._systems[ip] = {"name": dev["Name"], "dept": dev["Department"],
+                                  "location": dev["Location"], "latency": None}
+            node_list.append({
+                "ip": ip, "name": dev["Name"], "dept": dev["Department"],
+                "location": dev["Location"],
+                "fill": dept_color[dev["Department"]],
+                "lx": lx, "ly": ly, "is_source": False,
+                "parent_ip": pid,
+                "zone": dev.get("Zone", "").strip()
+            })
 
         self._map.set_nodes(node_list, preserved_positions=preserved)
         self.after(150, self._map.fit_view)

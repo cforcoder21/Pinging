@@ -1,41 +1,41 @@
-IP,Name,Department,Location,Parent IP
-8.8.8.8,Google DNS Primary,IT,Cloud - Google,
-8.8.4.4,Google DNS Secondary,IT,Cloud - Google,
-1.1.1.1,Cloudflare DNS,IT,Cloud - Cloudflare,
-1.0.0.1,Cloudflare DNS Alt,IT,Cloud - Cloudflare,
-127.0.0.1,Localhost,IT,Local Machine,
-192.168.1.1,Main Router,Network,Server Room,
-192.168.1.2,Switch Core,Network,Server Room,192.168.1.1
-192.168.1.10,NAS Storage,IT,Server Room,192.168.1.2
-192.168.1.20,IT Workstation 1,IT,IT Office,192.168.1.2
-192.168.1.21,IT Workstation 2,IT,IT Office,192.168.1.2
-192.168.1.30,HR Manager PC,HR,HR Office - Floor 1,192.168.1.2
-192.168.1.31,HR Assistant PC 1,HR,HR Office - Floor 1,192.168.1.30
-192.168.1.32,HR Assistant PC 2,HR,HR Office - Floor 1,192.168.1.30
-192.168.1.33,HR Printer,HR,HR Office - Floor 1,192.168.1.30
-192.168.1.40,Accounts PC 1,Accounts,Accounts - Floor 2,192.168.1.2
-192.168.1.41,Accounts PC 2,Accounts,Accounts - Floor 2,192.168.1.40
-192.168.1.42,Accounts Printer,Accounts,Accounts - Floor 2,192.168.1.40
-192.168.1.50,Reception Desk PC,Reception,Reception - Ground,192.168.1.2
-192.168.1.51,Reception Phone,Reception,Reception - Ground,192.168.1.50
-192.168.1.60,Security Camera 1,Security,Entrance,192.168.1.2
-192.168.1.61,Security Camera 2,Security,Parking Lot,192.168.1.60
-192.168.1.62,Security DVR,Security,Security Room,192.168.1.2
-192.168.1.70,Warehouse PC,Warehouse,Warehouse - Bay A,192.168.1.2
-192.168.1.71,Warehouse Scanner 1,Warehouse,Warehouse - Bay A,192.168.1.70
-192.168.1.72,Warehouse Scanner 2,Warehouse,Warehouse - Bay B,192.168.1.70
-192.168.1.80,Sales PC 1,Sales,Sales Office - Floor 3,192.168.1.2
-192.168.1.81,Sales PC 2,Sales,Sales Office - Floor 3,192.168.1.80
-192.168.1.82,Sales Laptop 1,Sales,Sales Office - Floor 3,192.168.1.80
-192.168.1.90,Finance PC 1,Finance,Finance - Floor 2,192.168.1.2
-192.168.1.91,Finance PC 2,Finance,Finance - Floor 2,192.168.1.90
-192.168.1.100,Meeting Room TV 1,Facilities,Meeting Room A,192.168.1.2
-192.168.1.101,Meeting Room TV 2,Facilities,Meeting Room B,192.168.1.2
-192.168.1.110,Server 1 (App),IT,Server Room,192.168.1.2
-192.168.1.111,Server 2 (DB),IT,Server Room,192.168.1.110
-192.168.1.112,Server 3 (Backup),IT,Server Room,192.168.1.110
-10.0.0.50,Branch Office Router,Network,Branch Office,
-10.0.0.51,Branch Switch,Network,Branch Office,10.0.0.50
-172.16.0.5,VPN Gateway,IT,Remote - VPN,
-172.16.0.10,Remote Worker 1,Sales,Remote - Home,172.16.0.5
-172.16.0.11,Remote Worker 2,HR,Remote - Home,172.16.0.5
+IP,Name,Department,Location,Parent IP,Zone
+8.8.8.8,Google DNS Primary,IT,Cloud - Google,,
+8.8.4.4,Google DNS Secondary,IT,Cloud - Google,,
+1.1.1.1,Cloudflare DNS,IT,Cloud - Cloudflare,,
+1.0.0.1,Cloudflare DNS Alt,IT,Cloud - Cloudflare,,
+127.0.0.1,Localhost,IT,Local Machine,,
+192.168.1.1,Main Router,Network,Server Room,,
+192.168.1.2,Switch Core,Network,Server Room,192.168.1.1,
+192.168.1.10,NAS Storage,IT,Server Room,192.168.1.2,Server Room
+192.168.1.20,IT Workstation 1,IT,IT Office,192.168.1.2,
+192.168.1.21,IT Workstation 2,IT,IT Office,192.168.1.2,
+192.168.1.30,HR Manager PC,HR,HR Office - Floor 1,192.168.1.2,
+192.168.1.31,HR Assistant PC 1,HR,HR Office - Floor 1,192.168.1.30,
+192.168.1.32,HR Assistant PC 2,HR,HR Office - Floor 1,192.168.1.30,
+192.168.1.33,HR Printer,HR,HR Office - Floor 1,192.168.1.30,
+192.168.1.40,Accounts PC 1,Accounts,Accounts - Floor 2,192.168.1.2,
+192.168.1.41,Accounts PC 2,Accounts,Accounts - Floor 2,192.168.1.40,
+192.168.1.42,Accounts Printer,Accounts,Accounts - Floor 2,192.168.1.40,
+192.168.1.50,Reception Desk PC,Reception,Reception - Ground,192.168.1.2,
+192.168.1.51,Reception Phone,Reception,Reception - Ground,192.168.1.50,
+192.168.1.60,Security Camera 1,Security,Entrance,192.168.1.2,
+192.168.1.61,Security Camera 2,Security,Parking Lot,192.168.1.60,
+192.168.1.62,Security DVR,Security,Security Room,192.168.1.2,
+192.168.1.70,Warehouse PC,Warehouse,Warehouse - Bay A,192.168.1.2,
+192.168.1.71,Warehouse Scanner 1,Warehouse,Warehouse - Bay A,192.168.1.70,
+192.168.1.72,Warehouse Scanner 2,Warehouse,Warehouse - Bay B,192.168.1.70,
+192.168.1.80,Sales PC 1,Sales,Sales Office - Floor 3,192.168.1.2,
+192.168.1.81,Sales PC 2,Sales,Sales Office - Floor 3,192.168.1.80,
+192.168.1.82,Sales Laptop 1,Sales,Sales Office - Floor 3,192.168.1.80,
+192.168.1.90,Finance PC 1,Finance,Finance - Floor 2,192.168.1.2,
+192.168.1.91,Finance PC 2,Finance,Finance - Floor 2,192.168.1.90,
+192.168.1.100,Meeting Room TV 1,Facilities,Meeting Room A,192.168.1.2,
+192.168.1.101,Meeting Room TV 2,Facilities,Meeting Room B,192.168.1.2,
+192.168.1.110,Server 1 (App),IT,Server Room,192.168.1.2,Server Room
+192.168.1.111,Server 2 (DB),IT,Server Room,192.168.1.110,Server Room
+192.168.1.112,Server 3 (Backup),IT,Server Room,192.168.1.110,Server Room
+10.0.0.50,Branch Office Router,Network,Branch Office,,Branch Office
+10.0.0.51,Branch Switch,Network,Branch Office,10.0.0.50,Branch Office
+172.16.0.5,VPN Gateway,IT,Remote - VPN,,Remote Network
+172.16.0.10,Remote Worker 1,Sales,Remote - Home,172.16.0.5,Remote Network
+172.16.0.11,Remote Worker 2,HR,Remote - Home,172.16.0.5,Remote Network
